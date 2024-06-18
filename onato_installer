@@ -1,0 +1,314 @@
+#!/bin/bash
+VERSION="0.7"
+PARAMS=""
+
+set -euo pipefail
+IFS=$'#'
+
+CONFIG_DIR="$HOME/.config"
+CONFIG_FILE="$CONFIG_DIR/app_laucher.yaml"
+
+function setup_app_launcher_config() {
+    # Check if the file exists
+    if [ ! -f "$CONFIG_FILE" ]; then
+      # Create the config directory if it doesn't exist
+      if [ ! -d "$CONFIG_DIR" ]; then
+        mkdir -p "$CONFIG_DIR"
+      fi
+
+      # Populate the file with the desired content
+      cat <<EOL > "$CONFIG_FILE"
+repositories:
+  - url: https://github.com/onato/TypeReader
+  - url: https://github.com/onato/PureTime
+EOL
+      echo "File created and populated: $CONFIG_FILE"
+    fi
+}
+setup_app_launcher_config
+
+SUPPORTED_DEVICES=$(xcrun simctl list -v devices "iOS" | awk '$0 ~ /^ / { NF--; print $0; }' | tr '\n' "${IFS}")
+supported_ios_versions=$(xcrun simctl list -v runtimes | awk '$0 ~ /iOS/ { print $2}' | sort -r | tr '\n' "${IFS}")
+app="TypeReader"
+SUPPORTED_APPS=$(yq e '.repositories[] | "\(.url)"' "$CONFIG_FILE" | cut -d'/' -f5 | tr '\n' ' ')
+ios_version="latest"
+build="latest"
+device=$(xcrun simctl list -v devices "iOS" | grep "Pro Max" | tail -n 1 | awk '$0 ~ /^ / { NF--; print $0; }')
+verbose=0
+__usage="
+Download Onato iOS test builds and run them on a chosen iOS simulator.
+Usage: $(basename "$0") [OPTIONS]
+
+OPTIONS:
+  --list-apps                  List the available apps that your have listed.
+  --list-devices               List the available simulator devices you have installed.
+  --list-ios-versions          List the available iOS versions of the installed simulators.
+  -c, --choose-a-build         Allows you to select the build to install rathere than installing the latest build.
+  -f, --force-download         If the build has already been downloaded this flag will for it to be redownloaded.
+  -b, --build                  Install a specific build number.
+  -i, --ios-version <version>  Specify which iOS version you would like to test on.
+  -d, --device <device>        Specify which device, i.e. which simulator you would like to run the app on.
+  -a, --app <app>              Specify which app you would like to run on the simulator.
+  -w, --wizard                 Ask a series of questions instead of relying on the command parameters.
+  -h, --help                   Print the usage instructions.
+  -v, --version                Print the version of $(basename "$0").
+  --verbose                    Show a detailed log of the performed steps.
+"
+
+function log () {
+    if [[ $verbose -eq 1 ]]; then
+        echo "$@"
+    fi
+}
+
+function os_version {
+  log "Choose iOS version."
+  if [[ $1 == "latest" ]]; then
+    ios_version=$(xcrun simctl list -v runtimes | awk '$0 ~ /iOS/ { print $2}' | sort -r | head -n 1)
+  elif [[ $1 =~ valid_ios_version ]]; then
+    ask_for_os_version
+  fi
+  log "iOS Version: $ios_version"
+  log ""
+}
+
+while (( "$#" )); do
+  case "$1" in
+    -v|--version)
+      echo "Version: $VERSION"
+      exit 0;
+      ;;
+    -h|--help)
+      echo "$__usage"
+      exit 0
+      ;;
+    -w|--wizard)
+      use_wizard=0
+      shift
+      ;;
+    --list-apps)
+      echo "Available Apps:"
+      echo "${SUPPORTED_APPS[*]}" | awk '{for(i=1; i<=NF; i++) print "• " $i}'
+      exit 0
+      ;;
+    --list-devices)
+      echo "Available iOS Devices:"
+      xcrun simctl list -v devices "iOS $(os_version 'latest')" | awk '$0 ~ /^ / { NF--; print }'
+      exit 0
+      ;;
+    --list-ios-versions)
+      echo "Available iOS Versions:"
+      xcrun simctl list -v runtimes | awk '$0 ~ /iOS/ { print $2}' | sort -r
+      exit 0
+      ;;
+    --verbose)
+      verbose=1
+      shift
+      ;;
+    -c|--choose-a-build)
+      should_choose_build=0
+      shift
+      ;;
+    -f|--force-download)
+      should_force_download=1
+      shift
+      ;;
+    -i|--ios-version)
+      if [[ -n "$2" ]]; then
+        if [[ "${IFS}${supported_ios_versions[*]}${IFS}" =~ ${IFS}${2}${IFS} ]]; then
+          ios_version=$2
+          shift 2
+        else
+          echo "Error: Argument for $1 is invalid: $2" >&2
+          echo "Choose one of:"
+          xcrun simctl list -v runtimes | awk '$0 ~ /iOS/ { print $2}' | sort -r
+          exit 1
+        fi
+      else
+        echo "Error: Argument for $1 is missing" >&2
+        exit 1
+      fi
+      ;;
+    -b|--build)
+      if [[ -n "$2" ]]; then
+        build=$2
+        shift 2
+      else
+        echo "Error: Argument for $1 is missing" >&2
+        exit 1
+      fi
+      ;;
+    -d|--device)
+      if [[ -n "$2" ]] && [[ ${2:0:1} != "-" ]]; then
+        if [[ "${IFS}${SUPPORTED_DEVICES[*]}${IFS}" == *"${IFS}${2}${IFS}"* ]]; then
+          device=$2
+          shift 2
+        else
+          echo "Error: The argument for $1 i.e. $2 is not supported. Choose one of the following." >&2
+          echo " "
+          xcrun simctl list -v devices "iOS" | awk '$0 ~ /^ / { NF--; print }'
+          exit 1
+        fi
+      else
+        echo "Error: Argument for $1 is missing" >&2
+        exit 1
+      fi
+      ;;
+    -a|--app)
+      if [[ -n "$2" ]] && [[ ${2:0:1} != "-" ]]; then
+        if [[ "${SUPPORTED_APPS[*]}" =~ $2 ]]; then
+                app=$2
+                shift 2
+        else
+          echo "Error: The argument for $1 i.e. $2 is not supported. Choose one of: ${SUPPORTED_APPS[*]}." >&2
+          exit 1
+        fi
+      else
+        echo "Error: Argument for $1 is missing" >&2
+        exit 1
+      fi
+      ;;
+    -*) # unsupported flags
+      echo "Error: Unsupported flag $1" >&2
+      exit 1
+      ;;
+    *) # preserve positional arguments
+      PARAMS="$PARAMS $1"
+      shift
+      ;;
+  esac
+done
+
+# set positional arguments in their proper place
+eval set -- "$PARAMS"
+
+repo=$(yq e '.repositories[] | "\(.url)"' ~/.config/app_launcher.yaml | grep $app | cut -d'/' -f4,5)
+release=$(gh release list  -R $repo --limit 1 | awk '{ print $1 }')
+function build {
+  log "Fetching the latest build number."
+  if [[ -n ${should_choose_build+x} ]]; then
+    ask_for_build_number
+  elif [[ $1 == "latest" ]]; then
+    log "gh release view $release -R $repo"
+    build=$(gh release view "$release" -R "$repo" | grep asset: | grep -oE '1\.0-\d+' | cut -d'-' -f2 | sort -n | tail -1) \
+      || (echo "Version $release has no builds uploaded yet. Ask and iOS developer to upload one for you."; exit 0;)
+    log "Latest build is $build"
+    log ""
+  fi
+}
+
+function ask_which_app {
+    echo 'Which App?'
+    select app in TypeReader YourApp
+    do
+            case $app in
+            TypeReader|YourApp)
+                    break
+                    ;;
+            *)
+                    echo "Invalid app"
+                    ;;
+            esac
+    done
+}
+
+function ask_for_os_version {
+    echo 'Which version of iOS?'
+    select ios_version in $(xcrun simctl list -v runtimes | awk '$0 ~ /iOS/ { print $2}' | sort -r)
+    do
+        case $ios_version in
+        *)
+                break
+                ;;
+        esac
+    done
+}
+
+function ask_for_build_number {
+    echo "Select Build"
+    select build in $(gh release view "$release" -R "$repo" | awk '$0 ~ /asset:.*Simulator.*/ {gsub(/[^[:digit:]]/,""); print}' | sort -r)
+      do
+        case $build in
+        *)
+                break
+                ;;
+        esac
+      done
+}
+
+function ask_for_device {
+    log "xcrun simctl list -v devices \"iOS $ios_version\""
+    select device in $(xcrun simctl list -v devices "iOS $ios_version" | awk '$0 ~ /^ / { NF--; print ""$0"" }')
+    do
+        case $device in
+        *)
+                break
+                ;;
+        esac
+    done
+}
+
+function run_app {
+    log "gh release view $release -R $repo | grep $release-$build"
+    asset=$(gh release view "$release" -R "$repo" | awk '$0 ~ /asset:.*Simulator.*/ {print $2}' | grep "$release-$build")
+
+    temp_path="/tmp/${asset%%.xcarchive.zip}"
+
+    [[ -n ${should_force_download+x} ]] && [ -d "$temp_path" ] && rm -fR "$temp_path"
+
+    if ! (ls "$temp_path"/*.xcarchive 1> /dev/null 2>&1); then
+      rm -fR "$temp_path"
+      # This happens when a download is aborted, so we will start fresh.
+    fi
+
+    tmpdir=$(mktemp -q -d "$temp_path") || (install "$temp_path"; return 0)
+    if [[ -n ${tmpdir} ]]; then
+        echo "Downloading $build to $tmpdir..."
+        log "gh release download $release -p \"*Simulator-$release-$build*\" -D $tmpdir -R $repo"
+        gh release download "$release" -p "*Simulator-$release-$build*" -D "$tmpdir" -R "$repo"
+        unzip -q "$tmpdir/*" -d "$tmpdir"
+
+        install "$tmpdir"
+    fi
+}
+
+function install {
+    tmpdir=$1
+    destination=$(echo "$device" | awk '{ print substr($NF,2,length($NF)-2); }')
+
+    bold=$(tput bold)
+    normal=$(tput sgr0)
+    echo "${bold}$app($build)${normal} on an ${bold}${device%\(*}(iOS $ios_version)${normal}..."
+    log "open -a simulator"
+    open -a simulator
+
+    echo "Booting…"
+    log "xcrun simctl boot $destination 2> /dev/null || true"
+    xcrun simctl boot "$destination" 2> /dev/null || true
+
+    echo "Installing…"
+    log "xcrun simctl install $destination $tmpdir/*.xcarchive/Products/Applications/*"
+    xcrun simctl install "$destination" "$tmpdir"/*.xcarchive/Products/Applications/*
+
+    bundle_id=$(plutil -p "$tmpdir"/*.xcarchive/Info.plist | grep 'CFBundleIdentifier' | awk -F '\"' '{print $4}')
+
+    echo "Launching…"
+    log "xcrun simctl launch $destination $bundle_id 1> /dev/null"
+    xcrun simctl launch "$destination" "$bundle_id" 1> /dev/null
+}
+
+log ""
+log "$(gh --version)"
+log "Xcode Build: $(xcodebuild -version)"
+log ""
+if [[ -n ${use_wizard+x} ]]; then
+    ask_which_app
+    ask_for_os_version
+    ask_for_build_number
+    ask_for_device
+else
+    build "$build"
+    os_version "$ios_version"
+fi
+
+run_app
