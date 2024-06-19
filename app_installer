@@ -182,7 +182,7 @@ done
 # set positional arguments in their proper place
 eval set -- "$PARAMS"
 
-repo=$(yq e '.repositories[] | "\(.url)"' ~/.config/app_launcher.yaml | grep $app | cut -d'/' -f4,5)
+repo=$(yq e '.repositories[] | "\(.url)"' $CONFIG_FILE | grep $app | cut -d'/' -f4,5)
 release=$(gh release list  -R $repo --limit 1 | awk '{ print $1 }')
 function build {
   log "Fetching the latest build number."
